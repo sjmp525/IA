@@ -1,0 +1,5 @@
+000:   weight_decay = 2e-4   92.2
+001:   weight_decay = 2e-4   93.5
+002:   again   93.8 ---
+
+00base:   90.7
