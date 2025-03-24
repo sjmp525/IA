@@ -1,1 +1,1 @@
-GranularKan
+GranKANformer
