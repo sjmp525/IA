@@ -1,11 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from utils.DF_ABNNlib import DA, RPReLU, Maxout, IRConv2d, BinarizeConv2d_RBNN, BinarizeConv2d_ReCU, BinarizeConv2d_BiPer, Hist_Show
+from utils.DF_ABNNlib import DA, RPReLU, IRConv2d, BinarizeConv2d_RBNN, BinarizeConv2d_ReCU, BinarizeConv2d_BiPer, Hist_Show
 import torch.nn.init as init
 import math
 from tensorboardX import SummaryWriter
 import torchvision.utils as vutils
+import numpy as np
+import torchvision
+import torch.utils.model_zoo as model_zoo
 
 class LambdaLayer(nn.Module):
     def __init__(self, lambd):
@@ -18,14 +21,14 @@ class LambdaLayer(nn.Module):
 class BasicBlock_1w1a_18(nn.Module):
     expansion = 1
 
-    def __init__(self, in_planes, planes, stride=1, option='A'):
+    def __init__(self, in_planes, planes, stride=1, a_bit=32, w_bit=32, option='A'):
         super(BasicBlock_1w1a_18, self).__init__()
 
-        self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.conv1 = DA(in_planes, planes, kernel_size=3, stride=stride, padding=1, bias=False, a_bit=a_bit, w_bit = w_bit)
         self.bn1 = nn.BatchNorm2d(planes)
         self.nonlinear1 = RPReLU(planes)
 
-        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv2 = DA(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(planes)
         self.nonlinear2 = RPReLU(planes)
 
@@ -40,21 +43,12 @@ class BasicBlock_1w1a_18(nn.Module):
                                             F.pad(x[:, :, ::2, ::2], (0, 0, 0, 0, planes//4, planes//4), "constant", 0))
             elif option == 'B':
                 self.shortcut = nn.Sequential(
-                     nn.Conv2d(in_planes, self.expansion * planes, kernel_size=1, stride=stride, bias=False),
+                     BinarizeConv2d_BiPer(in_planes, self.expansion * planes, kernel_size=1, stride=stride, bias=False),
                      nn.BatchNorm2d(self.expansion * planes)
                 )
-    # def forward(self, x):
-    #     out = self.bn1(self.conv1(x))
-    #     out += self.shortcut(x)
-    #     out = self.nonlinear1(out)
-    #     x1 = out
-    #     out = self.bn2(self.conv2(out))
-    #     out += x1
-    #     out = self.nonlinear2(out)
-    #     return out
+
     def forward(self, x):
         out = self.conv1(x)
-        # Hist_Show(input[0][178], '4')
         out = self.bn1(out)
         out = self.nonlinear1(out)
 
@@ -62,6 +56,32 @@ class BasicBlock_1w1a_18(nn.Module):
         out = self.bn2(out)
 
         out += self.shortcut(x)
+        out = self.nonlinear2(out)
+        return out
+
+class BasicBlock_1w1a_18_ti(nn.Module):
+    expansion = 1
+
+    def __init__(self, in_planes, planes, stride=1):
+        super(BasicBlock_1w1a_18_ti, self).__init__()
+
+        self.conv1 = DA(in_planes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(planes)
+        self.nonlinear1 = RPReLU(planes)
+
+        self.conv2 = DA(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(planes)
+        self.nonlinear2 = RPReLU(planes)
+
+
+    def forward(self, x):
+        identity = x
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.nonlinear1(out)
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out += identity
         out = self.nonlinear2(out)
         return out
 
@@ -91,38 +111,12 @@ class BasicBlock(nn.Module):
                      nn.BatchNorm2d(self.expansion * planes)
                 )
 
-    # def forward(self, x):
-    #     out = self.conv1(x)
-    #     out = self.bn1(out)
-    #     out = F.hardtanh(out)
-    #
-    #     out = self.conv2(out)
-    #     out = self.bn2(out)
-    #
-    #     out += self.shortcut(x)
-    #     out = F.hardtanh(out)
-    #     return out
-    # def forward(self, x):
-    #     out = self.bn1(self.conv1(x))
-    #     out += self.shortcut(x)
-    #     out = self.nonlinear1(out)
-    #     x1 = out
-    #     out = self.bn2(self.conv2(out))
-    #     out += x1
-    #     out = self.nonlinear2(out)
-    # #     return out
-    def forward(self, x): # (用的是这个哦)
+    def forward(self, x):
         out = self.nonlinear1(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
         out += self.shortcut(x)
         out = self.nonlinear2(out)
         return out
-    # def forward(self, x): # 全精度跑的
-    #     out = F.relu(self.bn1(self.conv1(x)))
-    #     out = self.bn2(self.conv2(out))
-    #     out += self.shortcut(x)
-    #     out = F.relu(out)
-    #     return out
 
 class BasicBlock_t(nn.Module):
     expansion = 1
@@ -143,11 +137,9 @@ class BasicBlock_t(nn.Module):
 
     def forward(self, x):
         out = self.conv1(x)
-        # Hist_Show(out[178], '2')
         out = self.bn1(out)
         out = F.relu(out)
         out = self.conv2(out)
-        # Hist_Show(out[178], '3')
         out = self.bn2(out)
         out += self.shortcut(x)
         out = F.relu(out)
@@ -269,7 +261,7 @@ class ResNet(nn.Module):
             return logits
 
 class ResNet_s_18(nn.Module):
-    def __init__(self, block, num_blocks, num_classes=10):
+    def __init__(self, block, num_blocks, num_classes=10, a_bit=32, w_bit=32):
         super(ResNet_s_18, self).__init__()
         self.in_planes = 64
 
@@ -277,29 +269,23 @@ class ResNet_s_18(nn.Module):
         self.bn1 = nn.BatchNorm2d(64)
         self.nonlinear1 = RPReLU(64)
 
-        self.layer1 = self._make_layer(block, 64, num_blocks[0], stride=1)
-        self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2)
-        self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2)
-        self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2)
+        self.layer1 = self._make_layer(block, a_bit, w_bit, 64, num_blocks[0], stride=1)
+        self.layer2 = self._make_layer(block, a_bit, w_bit, 128, num_blocks[1], stride=2)
+        self.layer3 = self._make_layer(block, a_bit, w_bit, 256, num_blocks[2], stride=2)
+        self.layer4 = self._make_layer(block, a_bit, w_bit, 512, num_blocks[3], stride=2)
         self.linear = nn.Linear(512 * block.expansion, num_classes)
-        # self.linear = nn.Linear(512 * 16, num_classes)
         self.bn2 = nn.BatchNorm1d(512 * block.expansion)
-        # self.bn2 = nn.BatchNorm1d(512 * 16)
 
         self.apply(_weights_init)
-    def _make_layer(self, block, planes, num_blocks, stride):
+    def _make_layer(self, block, a_bit, w_bit, planes, num_blocks, stride):
         strides = [stride] + [1] * (num_blocks - 1)
         layers = []
         for stride in strides:
-            layers.append(block(self.in_planes, planes, stride))
+            layers.append(block(self.in_planes, planes, stride, a_bit, w_bit))
             self.in_planes = planes * block.expansion
         return nn.Sequential(*layers)
 
     def forward(self, x, out_feature=False):
-        # Hist_Show(x, 'qian')
-        # a1 = x - x.mean([1,2,3], keepdim=True)
-        # a2 = a1 / a1.std([1,2,3], keepdim=True)
-        # Hist_Show(a2, 'hou')
         s0 =(self.bn1(self.conv1(x)))
         s1 = self.layer1(s0)
         s2 = self.layer2(s1)
@@ -311,63 +297,102 @@ class ResNet_s_18(nn.Module):
         out = self.bn2(s5)
         out = self.linear(out)
         look = F.softmax(out, dim=1)
+        if out_feature == False:
+            return s4, out
+        else:
+            return out, s5
+# Caltech101所用
+class ResNet_s_18_cal(nn.Module):
+    def __init__(self, block, num_blocks, num_classes=10):
+        super(ResNet_s_18_cal, self).__init__()
+        self.in_planes = 64
+
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.nonlinear1 = RPReLU(64)
+
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+
+        self.layer1 = self._make_layer(block, 64, num_blocks[0], stride=1)
+        self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2)
+        self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2)
+        self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2)
+        self.linear = nn.Linear(512 * block.expansion, num_classes)
+        # self.bn2 = nn.BatchNorm1d(512 * block.expansion)
+
+        self.apply(_weights_init)
+    def _make_layer(self, block, planes, num_blocks, stride):
+        strides = [stride] + [1] * (num_blocks - 1)
+        layers = []
+        for stride in strides:
+            layers.append(block(self.in_planes, planes, stride))
+            self.in_planes = planes * block.expansion
+        return nn.Sequential(*layers)
+
+    def forward(self, x, out_feature=False):
+        s0 =self.nonlinear1(self.bn1(self.conv1(x)))
+        s0 = self.maxpool(s0)
+
+        s1 = self.layer1(s0)
+        s2 = self.layer2(s1)
+        s3 = self.layer3(s2)
+        s4 = self.layer4(s3)
+
+        out = F.avg_pool2d(s4, 4)
+        s5 = out.view(out.size(0), -1)
+        out = self.linear(s5)
+        look = F.softmax(out, dim=1)
+        if out_feature == False:
+            return s5, out
+        else:
+            return out, s5
+
+class ResNet_s_18_ti(nn.Module):
+    def __init__(self, block, num_blocks, num_classes=10):
+        super(ResNet_s_18_ti, self).__init__()
+        self.in_planes = 64
+
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.nonlinear1 = RPReLU(64)
+
+        self.layer1 = self._make_layer(block, 64, num_blocks[0], stride=1)
+        self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2)
+        self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2)
+        self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.linear = nn.Linear(512 * block.expansion, num_classes) # CIFAR10
+        # self.linear = nn.Linear(512 * 16, num_classes) # Caltech101
+        self.bn2 = nn.BatchNorm1d(512 * block.expansion) # CIFAR10
+        # self.bn2 = nn.BatchNorm1d(512 * 16) # Caltech101
+
+        self.apply(_weights_init)
+    def _make_layer(self, block, planes, num_blocks, stride):
+        strides = [stride] + [1] * (num_blocks - 1)
+        layers = []
+        for stride in strides:
+            layers.append(block(self.in_planes, planes, stride))
+            self.in_planes = planes * block.expansion
+        return nn.Sequential(*layers)
+
+    def forward(self, x, out_feature=False):
+        s0 =self.nonlinear1((self.bn1(self.conv1(x))))
+        s1 = self.layer1(s0)
+        s2 = self.layer2(s1)
+        s3 = self.layer3(s2)
+        s4 = self.layer4(s3)
+
+        # out = F.avg_pool2d(s4, 4)
+        out = self.avgpool(s4)
+        s5 = out.view(out.size(0), -1)
+        out = self.bn2(s5)
+        out = self.linear(out)
+        look = F.softmax(out, dim=1)
         # out = F.softmax(out, dim=1)
         if out_feature == False:
             return s4, out
         else:
             return out, s5
-
-# class ResNet_s_18(nn.Module):
-#     def __init__(self, block, num_blocks, num_classes=10):
-#         super(ResNet_s_18, self).__init__()
-#         self.in_planes = 64
-
-#         self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False) # CIFAR10/100的卷积核尺寸为3
-#         self.bn1 = nn.BatchNorm2d(64)
-#         self.nonlinear1 = RPReLU(64)
-
-#         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-
-#         self.layer1 = self._make_layer(block, 64, num_blocks[0], stride=1)
-#         self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2)
-#         self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2)
-#         self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2)
-#         self.linear = nn.Linear(512 * block.expansion, num_classes)
-#         # self.bn2 = nn.BatchNorm1d(512 * block.expansion)
-
-#         self.apply(_weights_init)
-#     def _make_layer(self, block, planes, num_blocks, stride):
-#         strides = [stride] + [1] * (num_blocks - 1)
-#         layers = []
-#         for stride in strides:
-#             layers.append(block(self.in_planes, planes, stride))
-#             self.in_planes = planes * block.expansion
-#         return nn.Sequential(*layers)
-
-#     def forward(self, x, out_feature=False):
-#         # Hist_Show(x, 'qian')
-#         # a1 = x - x.mean([1,2,3], keepdim=True)
-#         # a2 = a1 / a1.std([1,2,3], keepdim=True)
-#         # Hist_Show(a2, 'hou')
-#         s0 =self.nonlinear1((self.bn1(self.conv1(x))))
-#         s0 =self.maxpool(s0)
-
-#         s1 = self.layer1(s0)
-#         s2 = self.layer2(s1)
-#         s3 = self.layer3(s2)
-#         s4 = self.layer4(s3)
-
-#         out = F.avg_pool2d(s4, 4)
-#         s5 = out.view(out.size(0), -1)
-#         # out = self.bn2(s5)
-#         out = self.linear(s5)
-#         look = F.softmax(out, dim=1)
-#         # out = F.softmax(out, dim=1)
-#         if out_feature == False:
-#             return s5, out
-#         else:
-#             return out, s5
-
 
 def _weights_init(m):
     if isinstance(m, nn.Linear) or isinstance(m, nn.Conv2d):
@@ -408,7 +433,6 @@ class ResNet_20(nn.Module):
     def forward(self, x):
         # s0 = F.hardtanh(self.bn1(self.conv1(x)))
         s0 = (self.bn1(self.conv1(x)))
-
         s1 = self.layer1(s0)
         s2 = self.layer2(s1)
         s3 = self.layer3(s2)
@@ -436,17 +460,17 @@ class VGG_SMALL_1W1A(nn.Module):
         super(VGG_SMALL_1W1A, self).__init__()
         self.conv0 = nn.Conv2d(3, 128, kernel_size=3, padding=2, bias=False)
         self.bn0 = nn.BatchNorm2d(128)
-        self.conv1 = nn.Conv2d(128, 128, kernel_size=3, padding=1, bias=False)
+        self.conv1 = DA(128, 128, kernel_size=3, padding=1, bias=False)
         self.pooling = nn.MaxPool2d(kernel_size=2, stride=2)
         self.bn1 = nn.BatchNorm2d(128)
         self.nonlinear = nn.Hardtanh(inplace=True)
-        self.conv2 = nn.Conv2d(128, 256, kernel_size=3, padding=1, bias=False)
+        self.conv2 = DA(128, 256, kernel_size=3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(256)
-        self.conv3 = nn.Conv2d(256, 256, kernel_size=3, padding=1, bias=False)
+        self.conv3 = DA(256, 256, kernel_size=3, padding=1, bias=False)
         self.bn3 = nn.BatchNorm2d(256)
-        self.conv4 = nn.Conv2d(256, 512, kernel_size=3, padding=1, bias=False)
+        self.conv4 = DA(256, 512, kernel_size=3, padding=1, bias=False)
         self.bn4 = nn.BatchNorm2d(512)
-        self.conv5 = nn.Conv2d(512, 512, kernel_size=3, padding=1, bias=False)
+        self.conv5 = DA(512, 512, kernel_size=3, padding=1, bias=False)
         self.bn5 = nn.BatchNorm2d(512)
         self.fc = nn.Linear(512*4*4, num_classes)
 
@@ -496,19 +520,23 @@ class VGG_SMALL_1W1A(nn.Module):
         x = self.bn5(x)
         s6 = self.nonlinear(x)
 
-        # s7 = self.pooling(s6)  # 输出: (batch_size, 512, 8, 8)
-        # s8 = self.pooling(s7)  # 输出: (batch_size, 512, 4, 4)
-
         s9 = s6.view(s6.size(0), -1)
         x = self.fc(s9)
         return s9, x
 
 
-def resnet18_1w1a(num_classes=10):
-    return ResNet_s_18(BasicBlock_1w1a_18, [2, 2, 2, 2], num_classes)
+def conv3x3Binary(in_planes, out_planes, stride=1):
+    "3x3 convolution with padding"
+    return DA(in_planes, out_planes, kernel_size=3, stride=stride,
+                    padding=1, bias=False)
 
-# def ResNet18_8x(num_classes=10):
-#     return ResNet_s(BasicBlock, [2, 2, 2, 2], num_classes)
+def conv3x3(in_planes, out_planes, stride=1):
+    "3x3 convolution with padding"
+    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False)
+
+
+def resnet18_1w1a(num_classes=10, a_bit=32, w_bit=32):
+    return ResNet_s_18(BasicBlock_1w1a_18, [2, 2, 2, 2], num_classes, a_bit, w_bit)
 
 def resnet20_1w1a(num_classes=10):
     return ResNet_20(BasicBlock, [3, 3, 3], num_classes)
@@ -519,24 +547,15 @@ def resnet34_1w1a(num_classes=10):
 def ResNet34_8x(num_classes=10):
     return ResNet_t(BasicBlock_t, [3, 4, 6, 3], num_classes)
 
-res = {"resnet56": [16, 16, 32, 64]}
-def resnet56_cifar(model_name='resnet56', **kwargs):
-    return ResNet(56, res[model_name], BasicBlock_t, **kwargs)
-
-# def resnet34_1w1a(num_classes=10):
-#     return ResNet_t(BasicBlock_1w1a_18, [3, 4, 6, 3], num_classes)
-
-# def ResNet50_8x(num_classes=10):
-#     return ResNet(Bottleneck, [3, 4, 6, 3], num_classes)
-#
-#
-# def ResNet101_8x(num_classes=10):
-#     return ResNet(Bottleneck, [3, 4, 23, 3], num_classes)
-#
-#
-# def ResNet152_8x(num_classes=10):
-#     return ResNet(Bottleneck, [3, 8, 36, 3], num_classes)
-
 def vgg_small_1w1a(**kwargs):
     model = VGG_SMALL_1W1A(**kwargs)
     return model
+
+def resnet18_1w1a_ti(num_classes=10):
+    return ResNet_s_18_ti(BasicBlock_1w1a_18_ti, [2, 2, 2, 2], num_classes)
+
+def resnet18_1w1a_cal(num_classes=10):
+    return ResNet_s_18_cal(BasicBlock_1w1a_18, [2, 2, 2, 2], num_classes)
+
+def resnet34_1w1a_cal(num_classes=10):
+    return ResNet_s_18_cal(BasicBlock_1w1a_18, [3, 4, 6, 3], num_classes)
